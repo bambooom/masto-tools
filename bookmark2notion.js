@@ -2,6 +2,7 @@ const { config } = require('dotenv');
 const { login } = require('masto');
 const { Client } = require('@notionhq/client');
 const { JSDOM } = require('jsdom');
+const findIdx = require('lodash/findIndex');
 
 config();
 const URL_RE =
@@ -13,11 +14,6 @@ const dbID = process.env.BOOKMARK_DATABASE_ID;
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
-}
-
-// a is after b
-function isAfter(a, b) {
-  return new Date(a).getTime() > new Date(b).getTime();
 }
 
 function dudu2props(item) {
@@ -126,44 +122,49 @@ async function main() {
     ],
     page_size: 1,
   });
-  let last = sorted.results[0].created_time;
-  console.log(sorted.results[0]);
-  // console.log(sorted.results[0].created_time); // '2022-02-26T11:22:00.000Z',
+  let last = sorted.results?.[0].properties.ID.rich_text[0].plain_text || null;
 
-  const bookmarks = [];
+  let bookmarks = [];
   let gen = await masto.bookmarks.getIterator({ limit: 50 });
-  let { value } = await gen.next();
-  // '2022-02-21T20:05:45.247Z'
-  console.log(value[0].createdAt);
-  console.log(last);
-  console.log(isAfter(last, value[0].createdAt));
-  // 不能用 createdAt 来作为新的判断标准，这个时间是原嘟文创建的时间，并不是你添加到 bookmark 的时间，还是只能用 ID 来判断
-  if (isAfter(last, value[0].createdAt)) {
-    // no new bookmarks
-    console.log('All bookmarks imported.');
-    return;
-  } else if (isAfter(last, value[value.length - 1].createdAt)) {
-    // has new bookmarks, but no more than 40(limit)
-    bookmarks.push(...value.filter((item) => isAfter(item.createdAt, last)));
-  } else {
-    // has more bookmarks not imported
-    bookmarks.push(...value);
-    while (isAfter(value[value.length - 1].createdAt, last)) {
+
+  if (last) {
+    let idx = null;
+    while (idx === -1 || idx === null) {
+      let { value } = await gen.next();
+      idx = findIdx(value, (v) => v.id === last);
+      if (idx > 0) { // no need to fetch more
+        bookmarks.push(...value.slice(0, idx));
+        console.log('Fetched', bookmarks.length, 'bookmarks.');
+        break;
+      } else if (idx === 0) { // no new item
+        break;
+      } // else: index == -1, need to fetch more
+      await sleep('500');
+    }
+    if (bookmarks.length) {
+      console.log('New', bookmarks.length, 'bookmarks to be inserted.');
+    } else {
+      console.log('No new bookmarks.');
+      return;
+    }
+
+  } else { // no last means the notion db is blank now, need to fetch all bookmarks
+    let done = false;
+    while (!done) {
       let res = await gen.next();
-      if (res.done) {
+      done = res.done;
+      if (done) {
         break;
       }
-      value = res.value;
-      if (value) {
-        bookmarks.push(
-          ...value.filter((item) => isAfter(item.createdAt, last))
-        );
-        console.log('Fetched ', bookmarks.length, ' bookmarks.');
+      if (res.value) {
+        bookmarks.push(...res.value);
+        console.log('Fetched', bookmarks.length, 'bookmarks.');
         await sleep('500');
       }
     }
   }
 
+  bookmarks = bookmarks.reverse(); // order in mastodon API is reversed by time, last in, last out
   for (let i = 0; i < bookmarks.length; i++) {
     const item = bookmarks[i];
     try {
@@ -176,10 +177,10 @@ async function main() {
       const response = await notion.pages.create(postData);
       await sleep('200');
       if (response && response.id) {
-        console.log(item.url, ' page created.');
+        console.log(item.url, ' page created (id=', item.id, ')');
       }
     } catch (error) {
-      console.warn('Failed to create the page for ', item.url);
+      console.warn('Failed to create the page for ', item.url, '(id=', item.id, ')');
     }
   }
 }
