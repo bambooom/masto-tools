@@ -67,12 +67,12 @@ function dudu2props(item) {
         url: source,
       },
       ID: {
-        rich_text: {
+        rich_text: [{
           type: 'text', // not using number as the ID is very big number
           text: {
             content: id,
           },
-        },
+        }],
       },
     },
     children: [
